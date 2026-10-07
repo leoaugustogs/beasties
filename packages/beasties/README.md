@@ -447,3 +447,21 @@ This is not an official Google product.
 
 [beasties-webpack-plugin]: https://github.com/danielroe/beasties/tree/main/packages/beasties-webpack-plugin
 [critical css]: https://www.smashingmagazine.com/2015/08/understanding-critical-css/
+
+## Parallel processing (`beasties/pool`)
+
+`BeastiesPool` runs `process` on worker threads. Output is identical to `new Beasties(options).process(html)`.
+
+```js
+import { BeastiesPool } from 'beasties/pool'
+
+const pool = new BeastiesPool({
+  workers: 4,
+  options: { preload: 'media', allowRules: [/\\['"]/] }, // structured-cloneable Beasties options
+  additionalStyleSelector: 'style[data-component-css]', // also reduce these <style> tags
+  resolveCss: async href => readCss(href), // runs on the main thread, once per href and worker
+  // or: css: { '/entry.css': '...' }
+})
+const html = await pool.process(page) // call as often and as concurrently as you like
+await pool.close()
+```

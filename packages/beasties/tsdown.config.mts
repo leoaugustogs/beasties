@@ -8,7 +8,7 @@ export default defineConfig([
     copy: [{ from: 'src/index.d.ts', to: 'dist' }],
   },
   {
-    entry: ['src/compiler.ts', 'src/runtime.ts'],
+    entry: ['src/compiler.ts', 'src/runtime.ts', 'src/pool.ts', 'src/pool-worker.ts'],
     format: ['esm'],
     dts: true,
   },

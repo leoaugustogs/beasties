@@ -40,7 +40,8 @@
       "default": "./dist/index.mjs"
     },
     "./compiler": "./dist/compiler.mjs",
-    "./runtime": "./dist/runtime.mjs"
+    "./runtime": "./dist/runtime.mjs",
+    "./pool": "./dist/pool.mjs"
   },
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
