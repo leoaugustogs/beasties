@@ -37,6 +37,9 @@ const SELECTORS = [
   '.a [data-x]',
   'html .b',
   'body .b',
+  'div [class~="Foo" i]',
+  'div [id="Y" i]',
+  '.a [class~="B" i]',
   '.tpl .inside',
   '.t .b',
   '.dark .b',
@@ -89,6 +92,15 @@ describe('indexed selector matching', () => {
       }
     })
   }
+
+  it('keeps matching siblings of <html> when the container is <html>', () => {
+    const doc = createDocument('<div class="x"></div><html><head></head><body><p class="b">p</p></body></html>')
+    const container = doc.beastiesContainers[0]!
+    for (const sel of ['.x ~ * .b', '.x + html .b', '.x ~ html .b', 'div ~ html .b', '.x + body .b']) {
+      expect({ sel, actual: container.exists(sel) }).toEqual({ sel, actual: !!selectOne(sel, container) })
+    }
+    expect(container.exists('.x ~ * .b')).toBe(true)
+  })
 
   it('sees DOM changes after the index is invalidated', () => {
     const doc = createDocument('<html><body><div class="a"><i class="b">x</i></div></body></html>')

@@ -48,8 +48,10 @@ class WorkerBeasties extends Beasties {
     const styles = super.getAffectedStyleTags(document)
     if (!extra?.length)
       return styles
+    // the usual set (all inline styles unless reduceInlineStyles is false) plus the extra ones
+    const usual = new Set(styles)
     return [...document.querySelectorAll('style')].filter(
-      (style: any) => style.$$external || extra.some(selector => is(style, selector)),
+      (style: any) => usual.has(style) || extra.some(selector => is(style, selector)),
     )
   }
 }

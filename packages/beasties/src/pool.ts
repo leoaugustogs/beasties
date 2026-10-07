@@ -28,6 +28,8 @@ export interface BeastiesPoolOptions {
    * worker unless `cacheResolved` is `false`, so side effects run on the main thread but not per page.
    */
   resolveCss?: (href: string) => string | undefined | Promise<string | undefined>
+  /** Path or URL of `pool-worker.mjs`, for bundlers that move it. @default next to this module */
+  workerFile?: string | URL
   /** Keep resolved stylesheets (and misses) in each worker. @default true */
   cacheResolved?: boolean
 }
@@ -55,6 +57,7 @@ export class BeastiesPool {
   #queue: Job[] = []
   #nextId = 0
   #closed = false
+  #failed?: Error
   #ready: Promise<void>
   readonly #options: BeastiesPoolOptions
 
@@ -82,6 +85,8 @@ export class BeastiesPool {
   process(html: string): Promise<string> {
     if (this.#closed)
       return Promise.reject(new Error('BeastiesPool is closed'))
+    if (this.#failed)
+      return Promise.reject(this.#failed)
     return new Promise((resolve, reject) => {
       this.#queue.push({ id: this.#nextId++, html, resolve, reject })
       this.#dispatch()
@@ -104,7 +109,7 @@ export class BeastiesPool {
   #spawn(): Promise<void> {
     const { options, additionalStyleSelector, css, resolveCss, cacheResolved } = this.#options
     const extra = additionalStyleSelector === undefined ? undefined : [additionalStyleSelector].flat()
-    const worker = new Worker(new URL('./pool-worker.mjs', import.meta.url), {
+    const worker = new Worker(this.#options.workerFile ?? new URL('./pool-worker.mjs', import.meta.url), {
       workerData: {
         options: options ?? {},
         additionalStyleSelector: extra,
@@ -173,9 +178,17 @@ export class BeastiesPool {
     this.#slots.splice(index, 1)
     slot.job?.reject(error)
     slot.job = undefined
-    if (!this.#closed && slot.ready) {
+    if (this.#closed)
+      return
+    if (slot.ready) {
       // replace a worker that died while running; one that failed to start is not retried
       this.#spawn().catch(() => {})
+    }
+    else if (!this.#slots.length) {
+      // no worker is left (e.g. pool-worker.mjs is missing): fail instead of queueing forever
+      this.#failed = error
+      for (const job of this.#queue.splice(0))
+        job.reject(error)
     }
   }
 

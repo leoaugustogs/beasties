@@ -94,4 +94,35 @@ describe('beastiesPool', () => {
     await assertion
     await expect(pool.process(page(2))).rejects.toThrow(/closed/)
   })
+
+  it('reduces plain inline styles as well as the additional selector', async () => {
+    const opts = { preload: 'media', logLevel: 'silent' } as const // reduceInlineStyles stays true
+    const reference = new (class extends Beasties {
+      async getCssAsset(href: string) {
+        return href === '/entry.css' ? CSS : undefined
+      }
+
+      getAffectedStyleTags(document: any) {
+        return [...document.querySelectorAll('style')]
+      }
+    })(opts)
+    const pool = new BeastiesPool({ workers: 1, options: opts, css: { '/entry.css': CSS }, additionalStyleSelector: 'style[data-component-css]' })
+    try {
+      const html = page(1)
+      const out = await pool.process(html)
+      expect(out).toBe(await reference.process(html))
+      expect(out).not.toContain('.never')
+    }
+    finally {
+      await pool.close()
+    }
+  })
+
+  it('fails instead of hanging when no worker can start', async () => {
+    const pool = new BeastiesPool({ workers: 2, options, workerFile: `${root}/dist/does-not-exist.mjs` })
+    const queued = pool.process(page(1))
+    await expect(queued).rejects.toThrow()
+    await expect(pool.process(page(2))).rejects.toThrow()
+    await pool.close()
+  })
 })

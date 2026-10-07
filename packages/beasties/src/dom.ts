@@ -417,6 +417,8 @@ interface SelectorPlan {
   test: (element: any) => boolean
   /** for a container whose parent is not an element, i.e. <html>: unscoped, ancestors count */
   testUnscoped: (element: any) => boolean
+  /** has a sibling combinator, which can reach siblings of <html> that no index covers */
+  hasSibling: boolean
   /** classes/ids (positive, top-level) anywhere in the selector: all must exist in the document */
   classes: string[]
   ids: string[]
@@ -470,13 +472,18 @@ function planSelector(sel: string): SelectorPlan | null {
   if (!tokens.length || TRAVERSALS.has(tokens[0]!.type))
     return null
 
-  const plan: SelectorPlan = { test, testUnscoped, classes: [], ids: [], lastClasses: [], lastIds: [] }
+  const plan: SelectorPlan = { test, testUnscoped, hasSibling: false, classes: [], ids: [], lastClasses: [], lastIds: [] }
   for (const token of tokens) {
+    if (token.type === 'sibling' || token.type === 'adjacent')
+      plan.hasSibling = true
     if (TRAVERSALS.has(token.type)) {
       plan.lastClasses = []
       plan.lastIds = []
     }
     else if (token.type === 'attribute') {
+      // case-insensitive lookups (`[class~=x i]`) are left to css-select
+      if (token.ignoreCase === true && (token.name === 'class' || token.name === 'id'))
+        return null
       if (token.name === 'class' && token.action === 'element' && token.namespace == null) {
         plan.classes.push(token.value)
         plan.lastClasses.push(token.value)
@@ -570,6 +577,9 @@ function fastSelectorExists(sel: string, node: Node): boolean {
   // css-select scopes a selector to its context element only when that element has an element
   // parent (so for a nested data-beasties-container, not for <html>)
   const scoped = !!node.parent && (node.parent.type === 'tag' || node.parent.type === 'script' || node.parent.type === 'style')
+  // an unscoped selector can start at a sibling of <html>, which the index does not cover
+  if (!scoped && plan.hasSibling)
+    return !!selectOne(sel, node)
   const test = scoped ? plan.test : plan.testUnscoped
   currentContainer = node
   const index = (node._selectorIndex ??= buildIndex(node))

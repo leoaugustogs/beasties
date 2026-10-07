@@ -465,3 +465,7 @@ const pool = new BeastiesPool({
 const html = await pool.process(page) // call as often and as concurrently as you like
 await pool.close()
 ```
+
+Memory: each distinct stylesheet is kept parsed (about 8.8 MB of heap for a 430 KB sheet) in every
+instance and every pool worker, up to `stylesheetCacheSize` (default 16) sheets, i.e. up to ~140 MB per
+instance or worker for sheets that size. Lower `stylesheetCacheSize` if you process many distinct large sheets.
