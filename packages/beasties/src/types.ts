@@ -114,6 +114,12 @@ export interface Options {
    */
   safeParser?: boolean
   /**
+   * Number of distinct parsed stylesheets kept per instance, so a stylesheet shared by many
+   * documents is parsed once. `0` disables the cache.
+   * @default 16
+   */
+  stylesheetCacheSize?: number
+  /**
    * Controls {@link LogLevel log level} of the plugin _(default: `"info"`)_
    */
   logLevel?: LogLevel

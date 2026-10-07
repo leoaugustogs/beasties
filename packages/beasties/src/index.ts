@@ -15,6 +15,7 @@
  */
 
 import type { ChildNode, Node, NodeWithChildren, Text } from 'domhandler'
+import type { Root } from 'postcss'
 
 import type { HTMLDocument } from './dom'
 import type { Logger, Options } from './types'
@@ -24,7 +25,7 @@ import path from 'node:path'
 
 import { applyMarkedSelectors, markOnly, parseStylesheet, serializeStylesheet, validateMediaQuery, walkStyleRules, walkStyleRulesWithReverseMirror } from './css'
 import { CRITTERS_DEPRECATION_WARNING, parseDirective } from './directives'
-import { createDocument, serializeDocument } from './dom'
+import { createDocument, invalidateSelectorIndex, serializeDocument } from './dom'
 import { addTextCodepoints, createTextCodepoints, normalizeFontFamily, parseFontFamilies, parseUnicodeRanges, toCodepointSet, unicodeRangeUsed } from './fonts'
 import { isSafeMediaValue } from './media'
 import { isAlwaysCriticalSelector, isUnevaluableSelectorError, normalizeCssSelector } from './selectors'
@@ -569,8 +570,12 @@ export default class Beasties {
     if (!sheet)
       return
 
-    const ast = parseStylesheet(sheet, { safeParser: this.options.safeParser !== false })
-    const astInverse = options.pruneSource ? parseStylesheet(sheet, { safeParser: this.options.safeParser !== false }) : null
+    for (const container of beastiesContainers) {
+      invalidateSelectorIndex(container as Node)
+    }
+
+    const ast = this.parseSheet(sheet)
+    const astInverse = options.pruneSource ? this.parseSheet(sheet) : null
 
     const criticalFonts = new Set<string>()
 
@@ -907,6 +912,31 @@ export default class Beasties {
       this.#preloadedFonts.set(document, preloaded)
     }
     return preloaded
+  }
+
+  /**
+   * Parse a stylesheet, once per distinct content. The processing below mutates the tree, so
+   * callers get a clone of the cached, never-mutated original.
+   */
+  #sheetCache = new Map<string, Root>()
+  private parseSheet(sheet: string): Root {
+    const max = this.options.stylesheetCacheSize ?? 16
+    const safeParser = this.options.safeParser !== false
+    if (max <= 0)
+      return parseStylesheet(sheet, { safeParser })
+    const key = (safeParser ? 's' : 'p') + sheet
+    let pristine = this.#sheetCache.get(key)
+    if (pristine) {
+      // refresh recency
+      this.#sheetCache.delete(key)
+    }
+    else {
+      pristine = parseStylesheet(sheet, { safeParser })
+      if (this.#sheetCache.size >= max)
+        this.#sheetCache.delete(this.#sheetCache.keys().next().value!)
+    }
+    this.#sheetCache.set(key, pristine)
+    return pristine.clone()
   }
 
   private normalizeCssSelector(sel: string): string {

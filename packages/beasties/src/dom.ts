@@ -14,12 +14,12 @@
  * the License.
  */
 
-import type { AttributeSelector } from 'css-what'
+import type { AttributeSelector, Selector } from 'css-what'
 
 import type { ChildNode, Node, NodeWithChildren } from 'domhandler'
 import type { Logger } from './util'
 
-import { selectAll, selectOne } from 'css-select'
+import { _compileUnsafe, selectAll, selectOne } from 'css-select'
 import { parse as selectorParser } from 'css-what'
 import render from 'dom-serializer'
 import { Element, Text } from 'domhandler'
@@ -121,6 +121,7 @@ declare module 'domhandler' {
     $$links?: ChildNode[]
     _classCache?: Set<string>
     _idCache?: Set<string>
+    _selectorIndex?: DocumentIndex
   }
 }
 
@@ -396,7 +397,211 @@ function cachedQuerySelector(sel: string, node: Node) {
     return true
   }
 
-  return !!selectOne(sel, node)
+  return fastSelectorExists(sel, node)
+}
+
+// ---------------------------------------------------------------------------
+// Indexed matching for selectors the class/id cache above cannot answer.
+//
+// `selectOne(sel, container)` walks every element of the document for every selector. Tailwind
+// style sheets have thousands of descendant selectors (`.group .group-hover\:x`), so that walk
+// dominated processing time. Instead the right-most compound of the selector is looked up in a
+// per-document class/id index, and the compiled selector (compiled once, shared by all documents)
+// is only run on those candidates. The answer is the same as selectOne's: the index holds exactly
+// the elements selectOne would visit (descendants of the container, skipping <template> contents),
+// and every candidate is still checked by css-select itself.
+// ---------------------------------------------------------------------------
+
+interface SelectorPlan {
+  /** relative to a container that is nested in another element (`:scope sel`) */
+  test: (element: any) => boolean
+  /** for a container whose parent is not an element, i.e. <html>: unscoped, ancestors count */
+  testUnscoped: (element: any) => boolean
+  /** classes/ids (positive, top-level) anywhere in the selector: all must exist in the document */
+  classes: string[]
+  ids: string[]
+  /** classes/ids of the right-most compound, used to pick candidates */
+  lastClasses: string[]
+  lastIds: string[]
+}
+
+interface DocumentIndex {
+  classes: Map<string, any[]>
+  ids: Map<string, any[]>
+  /** classes/ids of the container and its ancestors, which an unscoped selector can match too */
+  outerClasses: Set<string>
+  outerIds: Set<string>
+}
+
+const WHITESPACE_SPLIT_RE = /\s+/
+const EMPTY: any[] = []
+
+// `selectOne(sel, container)` compiles `sel` relative to the container (as `:scope sel`), so a
+// match chain has to lie strictly inside it. The shared compiled selectors get the same scoping
+// through a stand-in context element that `equals` resolves to the container being queried.
+const SCOPE_STAND_IN = new Element('scope-stand-in', {})
+SCOPE_STAND_IN.parent = new Element('scope-stand-in-parent', {}) as any
+let currentContainer: Node | undefined
+const planOptions = {
+  equals: (a: Node, b: Node) => (a === SCOPE_STAND_IN ? b === currentContainer : a === b),
+}
+
+const selectorPlanCache = new Map<string, SelectorPlan | null>()
+const TRAVERSALS = new Set(['descendant', 'child', 'sibling', 'adjacent'])
+
+function planSelector(sel: string): SelectorPlan | null {
+  let groups: Selector[][]
+  let test: SelectorPlan['test']
+  let testUnscoped: SelectorPlan['test']
+  try {
+    groups = selectorParser(sel)
+    // same compilation `selectOne(sel, node)` performs; errors are left for selectOne to throw
+    // compileToken rewrites the tokens it is given (scoping), so it gets its own parse
+    test = _compileUnsafe<any, any>(selectorParser(sel), { ...planOptions }, SCOPE_STAND_IN) as SelectorPlan['test']
+    testUnscoped = _compileUnsafe<any, any>(selectorParser(sel), { ...planOptions }) as SelectorPlan['test']
+  }
+  catch {
+    return null
+  }
+  // comma lists, leading combinators (relative to the context) and pseudos keep the generic path
+  if (groups.length !== 1)
+    return null
+  const tokens = groups[0]!
+  if (!tokens.length || TRAVERSALS.has(tokens[0]!.type))
+    return null
+
+  const plan: SelectorPlan = { test, testUnscoped, classes: [], ids: [], lastClasses: [], lastIds: [] }
+  for (const token of tokens) {
+    if (TRAVERSALS.has(token.type)) {
+      plan.lastClasses = []
+      plan.lastIds = []
+    }
+    else if (token.type === 'attribute') {
+      if (token.name === 'class' && token.action === 'element' && token.namespace == null) {
+        plan.classes.push(token.value)
+        plan.lastClasses.push(token.value)
+      }
+      else if (token.name === 'id' && token.action === 'equals' && token.namespace == null) {
+        plan.ids.push(token.value)
+        plan.lastIds.push(token.value)
+      }
+    }
+    else if (token.type !== 'tag' && token.type !== 'universal') {
+      return null
+    }
+  }
+  return plan
+}
+
+function buildIndex(container: Node): DocumentIndex {
+  const index: DocumentIndex = { classes: new Map(), ids: new Map(), outerClasses: new Set(), outerIds: new Set() }
+  for (let outer: any = container; outer; outer = outer.parent) {
+    if (outer.attribs?.class) {
+      for (const cls of outer.attribs.class.split(WHITESPACE_SPLIT_RE)) index.outerClasses.add(cls)
+    }
+    if (outer.attribs?.id != null)
+      index.outerIds.add(outer.attribs.id)
+  }
+  // same traversal as css-select's findOne: children of the container, not entering <template>
+  const stack: any[][] = [(container as any).children]
+  const positions = [0]
+  while (stack.length) {
+    const top = stack.length - 1
+    const list = stack[top]!
+    if (positions[top]! >= list.length) {
+      stack.pop()
+      positions.pop()
+      continue
+    }
+    const element = list[positions[top]!++]
+    if (element.type !== 'tag' && element.type !== 'script' && element.type !== 'style')
+      continue
+    const attribs = element.attribs
+    if (attribs) {
+      if (attribs.class) {
+        for (const cls of attribs.class.split(WHITESPACE_SPLIT_RE)) {
+          if (cls) {
+            const bucket = index.classes.get(cls)
+            if (!bucket)
+              index.classes.set(cls, [element])
+            else if (bucket[bucket.length - 1] !== element)
+              bucket.push(element)
+          }
+        }
+      }
+      if (attribs.id != null) {
+        const bucket = index.ids.get(attribs.id)
+        if (!bucket)
+          index.ids.set(attribs.id, [element])
+        else
+          bucket.push(element)
+      }
+    }
+    if (element.name !== 'template' && element.children?.length) {
+      stack.push(element.children)
+      positions.push(0)
+    }
+  }
+  return index
+}
+
+function isInside(element: any, container: Node): boolean {
+  for (let parent = element.parent; parent; parent = parent.parent) {
+    if (parent === container)
+      return true
+  }
+  return false
+}
+
+/** Drop the per-document index; the DOM may have changed since it was built. */
+export function invalidateSelectorIndex(container: Node): void {
+  container._selectorIndex = undefined
+}
+
+function fastSelectorExists(sel: string, node: Node): boolean {
+  let plan = selectorPlanCache.get(sel)
+  if (plan === undefined) {
+    plan = planSelector(sel)
+    selectorPlanCache.set(sel, plan)
+  }
+  if (!plan || node.type !== 'tag')
+    return !!selectOne(sel, node)
+
+  // css-select scopes a selector to its context element only when that element has an element
+  // parent (so for a nested data-beasties-container, not for <html>)
+  const scoped = !!node.parent && (node.parent.type === 'tag' || node.parent.type === 'script' || node.parent.type === 'style')
+  const test = scoped ? plan.test : plan.testUnscoped
+  currentContainer = node
+  const index = (node._selectorIndex ??= buildIndex(node))
+  for (const cls of plan.classes) {
+    if (!index.classes.has(cls) && (scoped || !index.outerClasses.has(cls)))
+      return false
+  }
+  for (const id of plan.ids) {
+    if (!index.ids.has(id) && (scoped || !index.outerIds.has(id)))
+      return false
+  }
+
+  let candidates: any[] | undefined
+  for (const cls of plan.lastClasses) {
+    const list = index.classes.get(cls) ?? EMPTY
+    if (!candidates || list.length < candidates.length)
+      candidates = list
+  }
+  for (const id of plan.lastIds) {
+    const list = index.ids.get(id) ?? EMPTY
+    if (!candidates || list.length < candidates.length)
+      candidates = list
+  }
+
+  if (!candidates)
+    return !!selectOne(test as any, node)
+
+  for (const element of candidates) {
+    if (test(element) && isInside(element, node))
+      return true
+  }
+  return false
 }
 
 function parseRelevantSelectors(sel: string): AttributeSelector[] | null {

@@ -66,6 +66,12 @@ export interface Options {
   keyframes?: string
   compress?: boolean
   safeParser?: boolean
+  /**
+   * Number of distinct parsed stylesheets kept per instance, so a stylesheet shared by many
+   * documents is parsed once. `0` disables the cache.
+   * @default 16
+   */
+  stylesheetCacheSize?: number
   logLevel?: 'info' | 'warn' | 'error' | 'trace' | 'debug' | 'silent'
   reduceInlineStyles?: boolean
   logger?: Logger
